@@ -1,4 +1,3 @@
-// Import necessary modules
 const express = require('express');
 const session = require('express-session');
 const mysql = require('mysql');
@@ -8,7 +7,11 @@ const multer = require('multer');
 const path = require('path');
 const { promises: fs } = require('fs');
 const SSLCommerzPayment = require("sslcommerz-lts");
-
+const util = require('util');
+require('dotenv').config();
+const store_id = process.env.STORE_ID;
+const store_passwd = process.env.STORE_SECRET;
+const is_live = false;
 // Create Express app
 const app = express();
 const port = process.env.PORT || 3000;
@@ -141,6 +144,18 @@ app.post('/product-upload', upload.single('productImage'), (req, res) => {
 app.get('/get-product', (req, res) => {
   const sql = "SELECT * FROM product";
   pool.query(sql, (err, results) => {
+    if (err) {
+      console.error("Error fetching data:", err);
+      res.status(500).send("Error fetching data");
+    } else {
+      res.json(results);
+    }
+  });
+});
+app.get('/get-product-approved', (req, res) => {
+  const role ="approved"
+  const sql = "SELECT * FROM product where role = ?";
+  pool.query(sql,[role], (err, results) => {
     if (err) {
       console.error("Error fetching data:", err);
       res.status(500).send("Error fetching data");
@@ -303,7 +318,10 @@ app.patch('/update-product/:id', upload.fields([{ name: 'productImage', maxCount
   }
 });
 
-// Generate a unique transaction ID
+
+// Promisify the pool.query method
+pool.query = util.promisify(pool.query);
+
 const generateTransactionId = () => {
   return crypto.randomBytes(16).toString('hex');
 };
@@ -311,33 +329,33 @@ const generateTransactionId = () => {
 // Route for handling orders
 app.post('/order', async (req, res) => {
   const order = req.body;
+  console.log(order);
   const tran_id = generateTransactionId();
 
-  console.log(order);
   console.log(tran_id);
 
   const data = {
     total_amount: order.price,
     currency: order.currency,
     tran_id: tran_id,
-    success_url: `https://bd-crafts-server.vercel.app/payment/success/${tran_id}`,
-    fail_url: `https://bd-crafts-server.vercel.app/payment/fail/${tran_id}`,
-    cancel_url: 'https://bd-crafts-server.vercel.app/login',
-    ipn_url: 'https://bd-crafts-server.vercel.app/ipn',
+    success_url: `http://localhost:3000/payment/success/${tran_id}`,
+    fail_url: `http://localhost:3000/payment/fail/${tran_id}`,
+    cancel_url: 'http://localhost:3000/login',
+    ipn_url: 'http://localhost:3000/ipn',
     shipping_method: 'Courier',
-    product_name: 'Computer.',
+    product_name: 'Computer',
     product_category: 'Electronic',
     product_profile: 'general',
     cus_name: order.name,
-    cus_email: 'customer@example.com',
+    cus_email: order.email,
     cus_add1: order.address,
     cus_add2: 'Dhaka',
     cus_city: 'Dhaka',
     cus_state: 'Dhaka',
     cus_postcode: '1000',
     cus_country: 'Bangladesh',
-    cus_phone: '01711111111',
-    cus_fax: '01711111111',
+    cus_phone: '01611826146',
+    cus_fax: '01708774287',
     ship_name: 'Customer Name',
     ship_add1: 'Dhaka',
     ship_add2: 'Dhaka',
@@ -352,15 +370,27 @@ app.post('/order', async (req, res) => {
   const sslcz = new SSLCommerzPayment(store_id, store_passwd, is_live);
   sslcz.init(data).then(apiResponse => {
     let GatewayPageURL = apiResponse.GatewayPageURL;
+    console.log(GatewayPageURL);
     res.send({ url: GatewayPageURL });
 
     const finalOrder = {
+      transactionId: tran_id,
       paidStatus: false,
-      transjectionId: tran_id,
+      totalAmount: order.price,
+      currency: order.currency,
+      name: order.name,
+      email:order.email,
+      address: order.address,
     };
 
-    const result = OrderCollection.insertOne(finalOrder);
-    console.log('Redirecting to: ', GatewayPageURL);
+    const sql = "INSERT INTO orderTable SET ?";
+    pool.query(sql, finalOrder, (err, result) => {
+      if (err) {
+        console.error("Error inserting order record:", err);
+      } else {
+        console.log("Order record inserted:", result);
+      }
+    });
   });
 });
 
@@ -370,12 +400,12 @@ app.post("/payment/success/:tranID", async (req, res) => {
 
   try {
     const result = await pool.query(
-      "UPDATE OrderTable SET paidStatus = ? WHERE transjectionId = ?",
+      "UPDATE orderTable SET paidStatus = ? WHERE transactionId = ?",
       [true, tranID]
     );
 
     if (result.affectedRows > 0) {
-      res.redirect(`https://bd-crafts-client.vercel.app/paymentSuccess/${tranID}`);
+      res.redirect(`http://localhost:5173/paymentSuccess/${tranID}`);
     } else {
       res.status(404).send("Transaction ID not found");
     }
@@ -391,12 +421,12 @@ app.post("/payment/fail/:tranID", async (req, res) => {
 
   try {
     const result = await pool.query(
-      "DELETE FROM OrderTable WHERE transjectionId = ?",
+      "DELETE FROM orderTable WHERE transactionId = ?",
       [tranID]
     );
 
     if (result.affectedRows > 0) {
-      res.redirect(`https://bd-crafts-client.vercel.app/payment/fail/${tranID}`);
+      res.redirect(`http://localhost:5173/paymentFail/${tranID}`);
     } else {
       res.status(404).send("Transaction ID not found");
     }
@@ -405,6 +435,57 @@ app.post("/payment/fail/:tranID", async (req, res) => {
     res.status(500).send("Internal server error");
   }
 });
+
+app.get('/my-bought-product/:email', (req, res) => {
+  const registerSql = "SELECT * FROM orderTable WHERE email = ?";
+  const email = req.params.email; // Use req.params.username to get the username
+
+  pool.query(registerSql, [email], (error, results) => {
+      if (error) {
+          return res.status(500).json({ error: "Internal Server Error" });
+      }
+      if (results.length > 0) {
+          res.json(results);
+      } else {
+          res.status(404).json({ message: "No records with status '' found" });
+      }
+  });
+});
+
+app.get('/api/bought-product-all', (req, res) => {
+  const registerSql = "SELECT * FROM orderTable";
+  
+  pool.query(registerSql, (error, results) => {
+      if (error) {
+          return res.status(500).json({ error: " Error fetching data" });
+      }
+      else {
+          res.json(results)
+      }
+  });
+});
+
+// Route to check transaction ID
+app.get('/api/check-transaction/:tranID', async (req, res) => {
+  const tranID = req.params.tranID;
+
+  try {
+    const result = await pool.query(
+      "SELECT * FROM orderTable WHERE transactionId = ?",
+      [tranID]
+    );
+
+    if (result.length > 0) {
+      res.status(200).send("Transaction found");
+    } else {
+      res.status(404).send("Transaction ID not found");
+    }
+  } catch (error) {
+    console.error("Error checking transaction ID:", error);
+    res.status(500).send("Internal server error");
+  }
+});
+
 
 // Route for serving product images
 app.get('/images/:imageName', (req, res) => {
